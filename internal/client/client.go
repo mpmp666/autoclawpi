@@ -4,8 +4,6 @@ package client
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -43,37 +41,58 @@ func deviceID() string {
 	if deviceIDCache != "" {
 		return deviceIDCache
 	}
-	h, _ := os.Hostname()
-	if h == "" {
-		h = "unknown"
-	}
-	deviceIDCache = fmt.Sprintf("%s-%s", h, loadOrCreateDeviceSeed())
+	deviceIDCache = loadOrCreateDeviceID()
 	return deviceIDCache
 }
 
-// loadOrCreateDeviceSeed 返回跨进程重启稳定的 4 字节随机种子（hex）。
+// loadOrCreateDeviceID 返回跨进程重启稳定的 device_id（UUID v4 形状）。
 //
-// 为什么必须持久化：上游把 OAuth 授权码绑定到「发起授权时的 device_id」。
-// 本程序原先每次启动都重新随机，于是「点登录 → 授权 → 粘贴回调换 token」
-// 这条链上只要中途重启过服务，换 token 时 device_id 就变了，上游直接返回
-// 631001 User login error（提示 User login error，很难看出是设备号不一致）。
-// 把种子落到配置目录后，重启不再影响已发起的授权。
-func loadOrCreateDeviceSeed() string {
+// 两个约束，都来自实测：
+//
+//  1. **必须是 UUID 形状**。上游的 zai-oauth-url 阶段不校验格式（随便什么串都能
+//     拿到授权链接），但 zai-oauth-login 换 token 时会校验，非 UUID 一律返回
+//     631001 User login error。对照能跑通的实现（andreanocalvin/autoclaw-autologin
+//     的 auth.py:279 `device_id = str(uuid.uuid4())`）确认了这一点。
+//     本程序原先发的是 "<hostname>-<8位hex>"，形状不对。
+//
+//  2. **必须跨重启稳定**。上游把授权码绑定到发起授权时的 device_id，原先每次
+//     启动重新随机，于是「点登录 → 授权 → 换 token」中间只要重启过服务（部署、
+//     崩溃、systemd restart）就会失败，错误同样是 631001。
+//
+// 所以把 UUID 落到 $AUTOCLAWPI_DIR/device-id（0600），之后一直复用。
+// 文件里若是旧格式（非 UUID），自动重写。
+func loadOrCreateDeviceID() string {
 	path := config.Path("device-id")
 	if b, err := os.ReadFile(path); err == nil {
-		if s := strings.TrimSpace(string(b)); len(s) == 8 {
+		if s := strings.TrimSpace(string(b)); isUUID(s) {
 			return s
 		}
 	}
-	b := make([]byte, 4)
-	if _, err := rand.Read(b); err != nil {
-		return "00000000"
-	}
-	s := hex.EncodeToString(b)
+	id := sign.UUID()
 	if err := os.MkdirAll(config.Dir(), 0o755); err == nil {
-		_ = os.WriteFile(path, []byte(s), 0o600)
+		_ = os.WriteFile(path, []byte(id), 0o600)
 	}
-	return s
+	return id
+}
+
+// isUUID 判断是否为 8-4-4-4-12 的 UUID 形状。
+func isUUID(s string) bool {
+	if len(s) != 36 {
+		return false
+	}
+	for i, r := range s {
+		switch i {
+		case 8, 13, 18, 23:
+			if r != '-' {
+				return false
+			}
+		default:
+			if !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'f') || (r >= 'A' && r <= 'F')) {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // Do melakukan request dengan User-Agent aplikasi.
