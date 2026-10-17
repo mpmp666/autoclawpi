@@ -9,7 +9,9 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -26,18 +28,29 @@ func Sign(ts int64) string {
 
 // HeadersAt membangun header aplikasi standar userapi dengan timestamp tertentu.
 // Gunakan ini bila timestamp body harus sama dengan header.
+//
+// X-Tm / X-Version bisa di-override lewat env (AUTOCLAW_X_TM / AUTOCLAW_X_VERSION):
+// upstream bisa saja mengikat kode OAuth ke fingerprint platform/versi saat
+// otorisasi diminta, jadi saat debug kita perlu bisa ganti tanpa build ulang.
 func HeadersAt(ts int64) map[string]string {
 	return map[string]string{
 		"Content-Type":     "application/json",
 		"Accept":           "*/*",
 		"X-Product":        "autoclaw",
-		"X-Version":        "1.17.9",
-		"X-Tm":             "linux",
+		"X-Version":        envOr("AUTOCLAW_X_VERSION", "1.17.9"),
+		"X-Tm":             envOr("AUTOCLAW_X_TM", "linux"),
 		"X-Auth-Appid":     appID,
 		"X-Auth-TimeStamp": strconv.FormatInt(ts, 10),
 		"X-Auth-Sign":      Sign(ts),
 		"X-Trace-Id":       newUUID(),
 	}
+}
+
+func envOr(key, fallback string) string {
+	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
+		return v
+	}
+	return fallback
 }
 
 // Headers membangun set header aplikasi standar userapi dengan timestamp sekarang.
