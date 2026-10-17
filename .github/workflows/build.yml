@@ -1,0 +1,46 @@
+name: build
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Build
+        run: |
+          set -eux
+          go version
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags "-s -w" -o autoclawpi-linux-arm64 ./cmd/autoclawpi
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o autoclawpi-linux-amd64 ./cmd/autoclawpi
+          ls -la autoclawpi-*
+          sha256sum autoclawpi-* > SHA256SUMS
+          cat SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: autoclawpi-bin
+          path: |
+            autoclawpi-linux-arm64
+            autoclawpi-linux-amd64
+            SHA256SUMS
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-latest
+          name: build-latest
+          body: |
+            自动构建的 autoclawpi 单二进制
+            - autoclawpi-linux-arm64（机顶盒/树莓派）
+            - autoclawpi-linux-amd64（x86_64）
+          files: |
+            autoclawpi-linux-arm64
+            autoclawpi-linux-amd64
+            SHA256SUMS
