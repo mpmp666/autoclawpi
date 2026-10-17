@@ -11,6 +11,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -69,6 +70,9 @@ func New(cl *client.Client, opts ...Option) *Server {
 	s.mux.HandleFunc("/accounts/login", s.authMiddleware(s.handleAccountsLogin))
 	s.mux.HandleFunc("/accounts/login/start", s.authMiddleware(s.handleAccountsLoginStart))
 	s.mux.HandleFunc("/accounts/login/captcha-result", s.authMiddleware(s.handleAccountsLoginCaptcha))
+	// 手动粘贴回调 URL 完成登录：面板跑在远程服务器时，浏览器跳转 localhost:18432
+	// 到不了机顶盒，用户把地址栏整条 URL 粘回来即可。
+	s.mux.HandleFunc("/accounts/login/manual", s.authMiddleware(s.handleAccountsLoginManual))
 	s.mux.HandleFunc("/accounts/import", s.authMiddleware(s.handleAccountsImport))
 	s.mux.HandleFunc("/accounts/claim", s.authMiddleware(s.handleClaim100M))
 	s.mux.HandleFunc("/checkin", s.authMiddleware(s.handleCheckin))
@@ -524,6 +528,106 @@ func (s *Server) handleAccountsLoginCaptcha(w http.ResponseWriter, r *http.Reque
 	}
 
 	json.NewEncoder(w).Encode(map[string]any{"ok": true, "url": oauthURL})
+}
+
+// handleAccountsLoginManual 用「用户手动粘贴的回调 URL」完成 OAuth 登录。
+//
+// 为什么需要它：面板的回调监听只绑 localhost:18432。面板部署在远程服务器
+// （比如机顶盒）时，浏览器在用户自己电脑上跳到 http://localhost:18432/... 是
+// 到不了服务器的，页面只会显示「无法访问」。用户把地址栏里那条完整 URL 粘回来，
+// 这里解析出 code/state 并替他把 token 换回来，效果与浏览器直接回调完全一致。
+//
+// 关键点：redirect_uri 必须与发起授权时用的一致。发起时是
+// http://localhost:<port>/auth/callback-zai，所以这里从粘贴的 URL 里原样取
+// scheme://host/path，而不是用请求的 Host（那会是 127.0.0.1:8091，对不上）。
+func (s *Server) handleAccountsLoginManual(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		CallbackURL string `json:"callbackUrl"`
+		Vendor      string `json:"vendor"`
+		NavigateURI string `json:"navigateUri"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		json.NewEncoder(w).Encode(map[string]any{"ok": false, "msg": "bad request"})
+		return
+	}
+
+	raw := strings.TrimSpace(req.CallbackURL)
+	if raw == "" {
+		json.NewEncoder(w).Encode(map[string]any{"ok": false, "msg": "回调 URL 不能为空"})
+		return
+	}
+
+	// 容错：允许贴完整 URL、只贴 ?code=... 查询串、或只贴 code 本身。
+	var code, state, navigateURI string
+	if u, err := url.Parse(raw); err == nil && u.Host != "" {
+		code = u.Query().Get("code")
+		state = u.Query().Get("state")
+		navigateURI = fmt.Sprintf("%s://%s%s", u.Scheme, u.Host, u.Path)
+		if req.Vendor == "" {
+			if strings.Contains(u.Path, "google") {
+				req.Vendor = "google"
+			}
+		}
+	} else if strings.Contains(raw, "code=") {
+		if q, err := url.ParseQuery(strings.TrimPrefix(strings.TrimSpace(raw), "?")); err == nil {
+			code = q.Get("code")
+			state = q.Get("state")
+		}
+	} else {
+		code = raw
+	}
+
+	if code == "" {
+		json.NewEncoder(w).Encode(map[string]any{
+			"ok": false, "msg": "URL 里找不到 ?code= 参数，请粘贴浏览器地址栏里完整的那条",
+		})
+		return
+	}
+	if navigateURI == "" {
+		navigateURI = strings.TrimSpace(req.NavigateURI)
+	}
+	if navigateURI == "" {
+		navigateURI = "http://localhost:18432/auth/callback-zai"
+	}
+	vendor := strings.TrimSpace(req.Vendor)
+	if vendor == "" {
+		vendor = "zai"
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	out, err := s.cl.Login(ctx, vendor, code, state, navigateURI)
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]any{"ok": false, "msg": err.Error()})
+		return
+	}
+	if out.Code != 0 || out.Data == nil || out.Data.AccessToken == "" {
+		json.NewEncoder(w).Encode(map[string]any{
+			"ok":  false,
+			"msg": fmt.Sprintf("code=%d msg=%s（授权码通常只有 30~60 秒有效且一次性，请重新登录并尽快粘贴）", out.Code, out.Msg),
+		})
+		return
+	}
+
+	deviceID := "web-oauth-" + fmt.Sprintf("%x", time.Now().UnixNano())
+	userID := ""
+	if out.Data.UserID != nil {
+		userID = fmt.Sprint(out.Data.UserID)
+	}
+	acctID, err := db.AddAccount(out.Data.UserName, out.Data.AccessToken, out.Data.RefreshToken, vendor, userID, out.Data.UserName, deviceID)
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]any{"ok": false, "msg": "保存账号失败: " + err.Error()})
+		return
+	}
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 15*time.Second)
+	points := fetchBalance(ctx2, out.Data.AccessToken, s.cl)
+	cancel2()
+	if points > 0 {
+		_ = db.UpdatePoints(acctID, points)
+	}
+	json.NewEncoder(w).Encode(map[string]any{
+		"ok": true, "id": acctID, "name": out.Data.UserName, "points": points,
+	})
 }
 
 func (s *Server) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {

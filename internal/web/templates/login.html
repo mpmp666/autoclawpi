@@ -28,6 +28,29 @@
   </button>
   <div id="status" style="font-size:13px;color:#64748b;margin-top:12px;text-align:center"></div>
 
+  <!-- 手动粘贴回调：面板跑在远程服务器时，浏览器跳 localhost:18432 到不了服务器 -->
+  <div id="manual-zone" style="display:none;margin-top:20px;padding-top:20px;border-top:1px dashed #2a2a32">
+    <p style="font-size:13px;color:#94a3b8;margin:0 0 8px">
+      授权完成后浏览器会跳到 <code style="color:#818cf8">http://localhost:18432/...</code>
+      —— 页面显示「无法访问 / 拒绝连接」是<strong>正常的</strong>（那个端口在你电脑上，不在服务器上）。
+      请把<strong>地址栏里完整的那一条 URL</strong>复制下来粘到下面。
+    </p>
+    <textarea id="manual-url" rows="4"
+      placeholder="http://localhost:18432/auth/callback-zai?code=...&state=..."
+      style="width:100%;box-sizing:border-box;background:#0f0f14;border:1px solid #2a2a32;color:#e2e8f0;border-radius:8px;padding:10px;font-family:ui-monospace,monospace;font-size:12px;resize:vertical"></textarea>
+    <div style="display:flex;gap:8px;margin-top:10px">
+      <button id="manual-btn" class="btn btn-primary" style="flex:1;justify-content:center">
+        <i class="fas fa-paste"></i> 用这条 URL 完成登录
+      </button>
+      <a id="oauth-link" class="btn" target="_blank" rel="noopener noreferrer"
+         style="flex:1;justify-content:center;display:flex;align-items:center;text-decoration:none">
+        <i class="fas fa-external-link-alt"></i> 重新打开授权页
+      </a>
+    </div>
+    <div id="manual-status" style="font-size:13px;margin-top:10px;text-align:center"></div>
+    <input type="hidden" id="oauth-raw" value="">
+  </div>
+
   <script>
   window.AliyunCaptchaConfig = {region: "ga", prefix: "{{.Prefix}}"};
   </script>
@@ -64,7 +87,14 @@
           body: JSON.stringify({verifyParam: param, provider: 'aliyun'})
         }).then(function(r){return r.json()}).then(function(d){
           if(d.ok && d.url) {
-            window.location.href = d.url;
+            // 在新标签页打开授权页；本页留在面板上，等用户把回调 URL 粘回来。
+            var w = window.open(d.url, '_blank', 'noopener');
+            document.getElementById('manual-zone').style.display = 'block';
+            document.getElementById('oauth-link').href = d.url;
+            document.getElementById('oauth-raw').value = d.url;
+            status.textContent = w ? '已在新标签页打开授权页' : '弹窗被拦截，请点下方「重新打开授权页」';
+            btn.innerHTML = '<i class="fas fa-check"></i> 已打开授权页';
+            btn.disabled = true;
           } else {
             status.textContent = 'Error: ' + (d.msg || 'Unknown');
             btn.disabled = false;
@@ -84,6 +114,40 @@
   }
   if (document.readyState === 'complete') setTimeout(init, 300);
   else window.addEventListener('load', function(){setTimeout(init, 300);});
+
+  // ---- 手动粘贴回调 URL 完成登录 ----
+  (function() {
+    var mb = document.getElementById('manual-btn');
+    if (!mb) return;
+    mb.addEventListener('click', function() {
+      var v = document.getElementById('manual-url').value.trim();
+      var ms = document.getElementById('manual-status');
+      if (!v) { ms.style.color = '#f87171'; ms.textContent = '请先粘贴回调 URL'; return; }
+      mb.disabled = true;
+      ms.style.color = '#94a3b8';
+      ms.textContent = '正在换取 token…';
+      fetch('/accounts/login/manual', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({callbackUrl: v, vendor: 'zai'})
+      }).then(function(r){return r.json()}).then(function(d){
+        mb.disabled = false;
+        if (d.ok) {
+          ms.style.color = '#34d399';
+          ms.textContent = '✅ 登录成功' + (d.name ? '：' + d.name : '') +
+            (d.points ? '（积分 ' + d.points + '）' : '');
+          setTimeout(function(){ window.location.href = '/accounts'; }, 1200);
+        } else {
+          ms.style.color = '#f87171';
+          ms.textContent = '❌ ' + (d.msg || '未知错误');
+        }
+      }).catch(function(e){
+        mb.disabled = false;
+        ms.style.color = '#f87171';
+        ms.textContent = '❌ 请求失败: ' + e.message;
+      });
+    });
+  })();
   </script>
   {{else if eq .Flow "done"}}
   <div style="text-align:center;padding:20px">
