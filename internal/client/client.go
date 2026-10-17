@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hirotomasato/autoclawpi/internal/config"
 	"github.com/hirotomasato/autoclawpi/internal/sign"
 )
 
@@ -46,10 +47,33 @@ func deviceID() string {
 	if h == "" {
 		h = "unknown"
 	}
-	b := make([]byte, 4)
-	rand.Read(b)
-	deviceIDCache = fmt.Sprintf("%s-%s", h, hex.EncodeToString(b))
+	deviceIDCache = fmt.Sprintf("%s-%s", h, loadOrCreateDeviceSeed())
 	return deviceIDCache
+}
+
+// loadOrCreateDeviceSeed 返回跨进程重启稳定的 4 字节随机种子（hex）。
+//
+// 为什么必须持久化：上游把 OAuth 授权码绑定到「发起授权时的 device_id」。
+// 本程序原先每次启动都重新随机，于是「点登录 → 授权 → 粘贴回调换 token」
+// 这条链上只要中途重启过服务，换 token 时 device_id 就变了，上游直接返回
+// 631001 User login error（提示 User login error，很难看出是设备号不一致）。
+// 把种子落到配置目录后，重启不再影响已发起的授权。
+func loadOrCreateDeviceSeed() string {
+	path := config.Path("device-id")
+	if b, err := os.ReadFile(path); err == nil {
+		if s := strings.TrimSpace(string(b)); len(s) == 8 {
+			return s
+		}
+	}
+	b := make([]byte, 4)
+	if _, err := rand.Read(b); err != nil {
+		return "00000000"
+	}
+	s := hex.EncodeToString(b)
+	if err := os.MkdirAll(config.Dir(), 0o755); err == nil {
+		_ = os.WriteFile(path, []byte(s), 0o600)
+	}
+	return s
 }
 
 // Do melakukan request dengan User-Agent aplikasi.
