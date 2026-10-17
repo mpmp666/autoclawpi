@@ -530,6 +530,14 @@ func (s *Server) handleAccountsLoginCaptcha(w http.ResponseWriter, r *http.Reque
 	json.NewEncoder(w).Encode(map[string]any{"ok": true, "url": oauthURL})
 }
 
+// truncateStr 截断用于日志的敏感串，避免把完整授权码/state 写进日志。
+func truncateStr(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "…"
+}
+
 // handleAccountsLoginManual 用「用户手动粘贴的回调 URL」完成 OAuth 登录。
 //
 // 为什么需要它：面板的回调监听只绑 localhost:18432。面板部署在远程服务器
@@ -596,15 +604,22 @@ func (s *Server) handleAccountsLoginManual(w http.ResponseWriter, r *http.Reques
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
+	// 把实际发出的字段打到日志里：631001 这类错误上游只说「User login error」，
+	// 只有对比 navigate_uri / device_id / state 才能看出是哪个维度对不上。
+	log.Printf("[manual-oauth] exchange vendor=%s navigate=%s code=%s state=%s",
+		vendor, navigateURI, truncateStr(code, 16), truncateStr(state, 24))
 	out, err := s.cl.Login(ctx, vendor, code, state, navigateURI)
 	if err != nil {
+		log.Printf("[manual-oauth] transport error: %v", err)
 		json.NewEncoder(w).Encode(map[string]any{"ok": false, "msg": err.Error()})
 		return
 	}
 	if out.Code != 0 || out.Data == nil || out.Data.AccessToken == "" {
+		log.Printf("[manual-oauth] upstream rejected: code=%d msg=%s trace=%s",
+			out.Code, out.Msg, out.Trace)
 		json.NewEncoder(w).Encode(map[string]any{
-			"ok":  false,
-			"msg": fmt.Sprintf("code=%d msg=%s（授权码通常只有 30~60 秒有效且一次性，请重新登录并尽快粘贴）", out.Code, out.Msg),
+			"ok": false,
+			"msg": fmt.Sprintf("code=%d msg=%s trace=%s", out.Code, out.Msg, out.Trace),
 		})
 		return
 	}
